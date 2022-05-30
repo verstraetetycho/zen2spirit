@@ -1,0 +1,149 @@
+import {
+  BadRequestException,
+  Controller,
+  Get,
+  Headers,
+  Param,
+  ParseIntPipe,
+  Request,
+} from '@nestjs/common';
+import { ApiTags } from '@nestjs/swagger';
+import {
+  Crud,
+  CrudController,
+  CrudRequest,
+  Override,
+  ParsedBody,
+  ParsedRequest,
+} from '@nestjsx/crud';
+import { AuthService } from 'src/auth/auth.service';
+import { Roles } from 'src/auth/roles.decorator';
+import { Role } from 'src/users/user.entity';
+import { UsersService } from 'src/users/users.service';
+import { Timeslot } from './timeslot.entity';
+import { TimeslotsService } from './timeslots.service';
+
+@ApiTags('timeslots')
+@Crud({
+  model: {
+    type: Timeslot,
+  },
+})
+@Controller('timeslots')
+export class TimeslotsController implements CrudController<Timeslot> {
+  constructor(
+    public service: TimeslotsService,
+    private authService: AuthService,
+    private usersService: UsersService,
+  ) {}
+
+  get base(): CrudController<Timeslot> {
+    return this;
+  }
+
+  @Roles(Role.Patient, Role.Specialist, Role.Admin)
+  @Override()
+  async getMany(@ParsedRequest() req: CrudRequest, @Headers() headers) {
+    const authHeader = headers.authorization;
+    const token = authHeader.replace('Bearer ', '');
+    const email = await this.authService.verifyAccessToken(token);
+    const user = await this.usersService.findByEmail(email);
+    if (user.role === Role.Specialist) {
+      req.options.query.filter = { 'Timeslot.specialistId': user.id };
+    }
+    return this.base.getManyBase(req);
+  }
+
+  @Roles(Role.Patient, Role.Specialist, Role.Admin)
+  @Override()
+  async getOne(@ParsedRequest() req: CrudRequest, @Headers() headers) {
+    const authHeader = headers.authorization;
+    const token = authHeader.replace('Bearer ', '');
+    const email = await this.authService.verifyAccessToken(token);
+    const user = await this.usersService.findByEmail(email);
+    if (user.role === Role.Specialist) {
+      req.options.query.filter = { 'Timeslot.specialistId': user.id };
+    }
+    return this.base.getOneBase(req);
+  }
+
+  @Roles(Role.Patient, Role.Specialist, Role.Admin)
+  @Get('specialist/:specialistId')
+  async getBySpecialistId(
+    @Request() req,
+    @Param('specialistId') specialistId: string,
+  ) {
+    return this.service.find({
+      where: { specialist: { id: specialistId } },
+    });
+  }
+
+  @Roles(Role.Specialist, Role.Admin)
+  @Override()
+  async createOne(
+    @ParsedRequest() req: CrudRequest,
+    @ParsedBody() dto: Timeslot,
+  ) {
+    if (dto.startTime > dto.endTime || dto.startTime == dto.endTime) {
+      throw new BadRequestException('StartTime must be less than endTime');
+    }
+    const existingTimeslots = await this.service.find({
+      where: {
+        specialist: dto.specialist,
+      },
+    });
+
+    for (const timeslot of existingTimeslots) {
+      if (
+        dto.startTime > timeslot.startTime &&
+        dto.startTime < timeslot.endTime
+      ) {
+        throw new BadRequestException(
+          `Timeslots can't overlap, choose another time`,
+        );
+      }
+    }
+    return await this.base.createOneBase(req, dto);
+  }
+
+  @Roles(Role.Specialist, Role.Admin)
+  @Override()
+  async updateOne(
+    @ParsedRequest() req: CrudRequest,
+    @ParsedBody() dto: Timeslot,
+    @Headers() headers,
+    @Param('id', new ParseIntPipe()) id,
+  ) {
+    const authHeader = headers.authorization;
+    const token = authHeader.replace('Bearer ', '');
+    const email = await this.authService.verifyAccessToken(token);
+    const user = await this.usersService.findByEmail(email);
+    if (dto.startTime > dto.endTime || dto.startTime == dto.endTime) {
+      throw new BadRequestException('StartTime must be less than endTime');
+    }
+    const selTimeslot = await this.service.findOne({ id: id });
+    const existingTimeslots = await this.service.find({
+      where: {
+        specialist: user,
+        day: selTimeslot.day,
+      },
+    });
+
+    for (const timeslot of existingTimeslots) {
+      if (timeslot.id === id) {
+        continue;
+      }
+      if (
+        (dto.startTime < timeslot.endTime &&
+          dto.startTime > timeslot.startTime) ||
+        (dto.endTime < timeslot.endTime && dto.endTime > timeslot.startTime)
+      ) {
+        throw new BadRequestException(
+          `Timeslots can't overlap, choose another time`,
+        );
+      }
+
+      return await this.base.updateOneBase(req, dto);
+    }
+  }
+}
